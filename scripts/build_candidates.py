@@ -6,7 +6,8 @@
 Rules (mechanical version of the trade plan; every threshold is a named constant below):
   Trend    4h close vs 4h EMA50 and 1d close vs 1d EMA20 must agree. No trade against them.
   Setup A  1h close breaks a level, then a 15m bar retests the level and closes back above it.
-           Levels: 1d / 4h / 1h range high, prior 48h high, yearly / monthly / weekly / daily open.
+           Levels: 1d / 4h / 1h range high, prior 48h high, yearly / monthly / weekly / daily open
+           (Istanbul time; 1d and 4h candles stay on the exchange's UTC grid, as on the chart).
            A range = the last 20 bars of that timeframe span at most 4 ATR; its high/low are the levels.
   Setup B  6h impulse >= 2.5 ATR, then a pullback of <= 50%, then a 15m close above the impulse high.
   Entry    at the close of the 15m trigger bar. Stop below the retest/flag low. Shorts are mirrored.
@@ -25,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 M15 = pd.Timedelta("15min")
+LOCAL_TZ = "Europe/Istanbul"   # day / week / month / year opens and the hour, dow features use this clock
 M15_NP = np.timedelta64(15, "m")
 DONCHIAN_H = 48          # 1h bars that define the "prior high" level
 RANGE_BARS, RANGE_MAX_ATR = 20, 4.0   # a range: 20 bars of a timeframe spanning <= 4 ATR of that timeframe
@@ -75,16 +77,18 @@ def range_at(times: pd.Series, bars: pd.DataFrame, dur: str, name: str) -> pd.Da
 
 
 def period_opens(b15: pd.DataFrame) -> pd.DataFrame:
-    """Daily / weekly (Monday) / monthly / yearly open, UTC. NaN when the period's first bar is missing."""
+    """Daily / weekly (Monday) / monthly / yearly open on the LOCAL_TZ clock (00:00 Istanbul = 21:00 UTC).
+    NaN when the period's first bar is missing."""
     idx = b15.index
-    day = idx.floor("D")
-    keys = {"d": day, "w": day - pd.to_timedelta(idx.dayofweek, unit="D"),
-            "m": day - pd.to_timedelta(idx.day - 1, unit="D"), "y": day - pd.to_timedelta(idx.dayofyear - 1, unit="D")}
+    local = idx.tz_convert(LOCAL_TZ)
+    day = local.floor("D")
+    keys = {"d": day, "w": day - pd.to_timedelta(local.dayofweek, unit="D"),
+            "m": day - pd.to_timedelta(local.day - 1, unit="D"), "y": day - pd.to_timedelta(local.dayofyear - 1, unit="D")}
     out = {}
     for k, key in keys.items():
         first_open = b15["open"].groupby(key).transform("first")
         first_time = pd.Series(idx, index=idx).groupby(key).transform("first")
-        out[f"lvl_open_{k}"] = first_open.where(first_time.to_numpy() == key.to_numpy())
+        out[f"lvl_open_{k}"] = first_open.where(pd.DatetimeIndex(first_time).asi8 == key.asi8)
     return pd.DataFrame(out, index=idx)
 
 
@@ -206,7 +210,7 @@ def candidates_for_pair(pair: str, b15: pd.DataFrame, months: set[str], cost_pct
             "n_levels_broken": int(row["n_levels_broken"]),
             **{f"dist_open_{k}_atr": (row["close"] - row[f"lvl_open_{k}"]) / atr for k in "dwmy"},
             **{f"rng_w_{n}": row[f"rng_w_{n}"] for n in ("1h", "4h", "1d")},
-            "hour": entry_time.hour, "dow": entry_time.dayofweek,
+            "hour": entry_time.tz_convert(LOCAL_TZ).hour, "dow": entry_time.tz_convert(LOCAL_TZ).dayofweek,
         })
     return out
 

@@ -28,7 +28,7 @@ python scripts/fetch_metrics.py      # optional for now; slow
 
 - Trend: 4h close vs 4h EMA50 and 1d close vs 1d EMA20 must agree; no trade against them.
 - Setup A: a 1h close breaks a level, then a 15m bar retests it and closes back beyond it. Levels are the
-  1d / 4h / 1h range boundary, the prior 48h extreme, and the yearly / monthly / weekly / daily open (UTC).
+  1d / 4h / 1h range boundary, the prior 48h extreme, and the yearly / monthly / weekly / daily open (Istanbul time, 00:00 = 21:00 UTC).
 - Setup B: a 6h impulse of at least 2.5 ATR, a pullback of at most 50%, then a 15m close beyond the impulse extreme.
 - Label: `label_2r` is 1 when +2R is touched before the stop; a bar that touches both counts as the stop.
 - `r_net`: half off at 2R, stop to entry, the rest at 3R / entry / 7-day timeout, minus fees and slippage.
