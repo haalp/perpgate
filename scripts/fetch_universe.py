@@ -30,8 +30,17 @@ REPO = "rogerdehe/klines-binance"
 SUFFIX = "_USDT_USDT"  # USDT-margined perpetual naming in the dataset
 TF_FREQ = {"1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "8h": "8h", "1d": "1D"}
 
-# Not tradeable setups: stablecoins and wrapped/pegged assets barely move.
-EXCLUDED_BASES = {"USDC", "BUSD", "TUSD", "FDUSD", "USDP", "DAI", "UST", "USTC", "EUR", "USD1", "PAXG", "XAUT", "WBTC"}
+# Stablecoins and pegged assets barely move, so the setups do not apply.
+STABLE_BASES = {"USDC", "BUSD", "TUSD", "FDUSD", "USDP", "DAI", "UST", "USTC", "EUR", "USD1", "PAXG", "XAUT", "WBTC"}
+# Perps on stocks, ETFs, metals and oil: not crypto, different hours and drivers. Review this list when the
+# universe changes; a ticker missing here simply stays in.
+NON_CRYPTO_BASES = {
+    "GOOGL", "NVDA", "TSLA", "MSTR", "INTC", "MRVL", "MU", "SNDK", "CRCL", "SAMSUNG", "SKHYNIX", "SPCX",   # stocks
+    "AAPL", "AMZN", "META", "MSFT", "AMD", "COIN", "HOOD", "PLTR", "NFLX", "BABA", "TSM", "AVGO",
+    "QQQ", "SPY", "SOXL", "EWY", "IWM", "TQQQ",                                                            # ETFs
+    "XAU", "XAG", "XPT", "XPD", "CL", "BZ", "NATGAS", "COPPER",                                            # metals, oil
+}
+EXCLUDED_BASES = STABLE_BASES | NON_CRYPTO_BASES
 
 
 def base_of(pair: str) -> str:
@@ -136,6 +145,8 @@ def main() -> None:
     if len(btc):  # sanity check of the volume unit: compare with Binance's own monthly figure
         r = btc.iloc[-1]
         print(f"    check: BTC perp traded ${r['usd_volume_prev_month'] / 1e9:,.0f}bn in the month before {r['month']}")
+    on_disk = {base_of(f.stem) for f in (a.data / "raw" / "futures" / "1d").glob(f"*{SUFFIX}.parquet")}
+    print(f"    excluded as stable or non-crypto: {', '.join(sorted(on_disk & EXCLUDED_BASES))}")
     print(f"2/3 universe: {uni['month'].nunique()} months ({uni['month'].min()} .. {uni['month'].max()}), "
           f"{len(pairs)} distinct pairs ever in the top {a.top}")
 

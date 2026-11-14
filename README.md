@@ -14,13 +14,15 @@ Research code. Nothing here places orders, and nothing here is investment advice
 | 1 | `scripts/fetch_universe.py` | 15m / 4h / 1d klines, `data/universe.csv` (monthly top 50 by previous month's USD volume, delisted pairs included), `data/integrity.csv` |
 | 1b | `scripts/fetch_metrics.py` | 5-minute open interest and long/short ratios from the Binance archive |
 | 2 | `scripts/build_candidates.py` | `data/candidates.parquet`: one row per candidate trade with features, `label_2r` and `r_net` |
+| 3 | `scripts/report.py` | result tables for the training period: by setup, side, year, level type, focus pairs, trend strength, stop distance |
 | - | `scripts/liq_map.py` | estimated liquidation map from open interest (library, not wired into step 2 yet) |
-| 3 | not written yet | GBM baseline, decision model, comparison under a pre-registered protocol |
+| 4 | not written yet | GBM baseline, decision model, comparison under [PROTOCOL.md](PROTOCOL.md) |
 
 ```bash
 pip install -r requirements.txt
 python scripts/fetch_universe.py
 python scripts/build_candidates.py
+python scripts/report.py
 python scripts/fetch_metrics.py      # optional for now; slow
 ```
 
@@ -37,9 +39,12 @@ Every threshold is a named constant at the top of the script.
 
 ## Status
 
-The scripts pass look-ahead and labelling tests on synthetic data. They have not been run on the real
-dataset yet, so there are no results. Known gaps: funding is not in `r_net`, the volume unit of the
-kline source is assumed to be base-asset quantity, and the liquidation map is unvalidated.
+First run on real data (2020-02 to 2026-11, 131k candidates before the non-crypto perps were removed): taking
+every candidate loses 0.165R per trade after costs. Every setup A group sits near the 1/3 hit rate a coin flip
+gives; setup B is the only positive group. No model has been trained yet. The splits and the bar a model has
+to clear are fixed in [PROTOCOL.md](PROTOCOL.md).
+
+Known gaps: funding is not in `r_net`, and the liquidation map is unvalidated and not yet a feature.
 
 Data: [rogerdehe/klines-binance](https://huggingface.co/datasets/rogerdehe/klines-binance) (MIT) and
 [data.binance.vision](https://data.binance.vision).

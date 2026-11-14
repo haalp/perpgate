@@ -20,11 +20,14 @@ it is in universe.csv. One open candidate per pair at a time. Funding is not mod
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling scripts
 
 M15 = pd.Timedelta("15min")
 LOCAL_TZ = "Europe/Istanbul"   # day / week / month / year opens and the hour, dow features use this clock
@@ -221,6 +224,40 @@ def candidates_for_pair(pair: str, b15: pd.DataFrame, months: set[str], cost_pct
     return out
 
 
+def add_momentum(c: pd.DataFrame, data: Path) -> pd.DataFrame:
+    """30- and 90-day return of the pair, its percentile among all crypto perps on that day, and BTC's
+    30-day return, each from the last daily bar that had closed before entry and each signed in the
+    direction of the trade (for a short, a falling pair ranks high). This is how "a strongly trending
+    pair" is measured without hindsight."""
+    from fetch_universe import EXCLUDED_BASES, SUFFIX, base_of
+
+    files = [f for f in sorted((data / "raw" / "futures" / "1d").glob(f"*{SUFFIX}.parquet"))
+             if base_of(f.stem) not in EXCLUDED_BASES]
+    cols = ["mom_30d", "mom_90d", "mom_30d_rank", "mom_90d_rank", "btc_mom_30d"]
+    if not files:
+        print("no 1d files found - momentum features left empty")
+        return c.assign(**{k: np.nan for k in cols})
+    px = pd.DataFrame({f.stem: load_15m(f)["close"] for f in files}).sort_index()
+    px = px.reindex(pd.date_range(px.index.min(), px.index.max(), freq="D"))   # one row per calendar day
+    parts = {}
+    for d in (30, 90):
+        r = px / px.shift(d) - 1
+        parts[f"mom_{d}d"], parts[f"mom_{d}d_rank"] = r, r.rank(axis=1, pct=True)
+    long = pd.DataFrame({"day": px.index.repeat(px.shape[1]), "pair": np.tile(px.columns.to_numpy(), px.shape[0]),
+                         **{k: v.to_numpy().ravel() for k, v in parts.items()}})
+    long["known_at"] = (long["day"] + pd.Timedelta("1D")).dt.as_unit("ns")     # a daily bar is known at its close
+    long = long.dropna(subset=["mom_30d"]).drop(columns="day").sort_values("known_at")
+    c = pd.merge_asof(c.sort_values("entry_time"), long, left_on="entry_time", right_on="known_at", by="pair",
+                      tolerance=pd.Timedelta("3D")).drop(columns="known_at")
+    btc = long.loc[long["pair"] == f"BTC{SUFFIX}", ["known_at", "mom_30d"]].rename(columns={"mom_30d": "btc_mom_30d"})
+    c = pd.merge_asof(c, btc, left_on="entry_time", right_on="known_at", tolerance=pd.Timedelta("3D")).drop(columns="known_at")
+    for k in ("mom_30d", "mom_90d", "btc_mom_30d"):
+        c[k] = c[k] * c["side"]
+    for k in ("mom_30d_rank", "mom_90d_rank"):
+        c[k] = c[k].where(c["side"] == 1, 1 - c[k])
+    return c.reset_index(drop=True)
+
+
 def load_15m(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path, columns=["date", "open", "high", "low", "close", "volume"])
     df["date"] = pd.to_datetime(df["date"], utc=True).dt.as_unit("ns")  # the dataset stores milliseconds; keep one unit everywhere
@@ -250,16 +287,13 @@ def main() -> None:
         print(f"no 15m file for {len(missing)} pairs: {', '.join(missing[:10])}{' ...' if len(missing) > 10 else ''}")
     if not rows:
         raise SystemExit("no candidates - check that the 15m files and universe.csv exist")
-    c = pd.DataFrame(rows).sort_values("entry_time").reset_index(drop=True)
+    c = add_momentum(pd.DataFrame(rows), a.data)
     c["universe_rank"] = [rank[(p, t.strftime("%Y-%m"))] for p, t in zip(c["pair"], c["entry_time"])]
     c.to_parquet(a.data / "candidates.parquet", index=False)
 
     print(f"{len(c)} candidates, {c['pair'].nunique()} pairs, {c['entry_time'].min():%Y-%m-%d} .. {c['entry_time'].max():%Y-%m-%d}")
-    s = c.groupby(["setup", "level_type", "side"]).agg(n=("label_2r", "size"), hit_2r=("label_2r", "mean"), r_net=("r_net", "mean"),
-                                         stop_pct=("stop_pct", "median"))
-    print(s.round(3).to_string())
-    print(f"all: hit_2r {c['label_2r'].mean():.3f}, mean r_net {c['r_net'].mean():+.3f} "
-          f"(break-even hit rate for this plan is roughly 1/3 before costs)")
+    print(f"wrote {a.data / 'candidates.parquet'}. Results are read with scripts/report.py, which only shows the "
+          "training period unless told otherwise (see PROTOCOL.md).")
 
 
 if __name__ == "__main__":
