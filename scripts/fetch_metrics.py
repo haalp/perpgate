@@ -36,7 +36,7 @@ def parse_zip(content: bytes) -> pd.DataFrame:
     with zipfile.ZipFile(io.BytesIO(content)) as z:
         df = pd.read_csv(z.open(z.namelist()[0]))
     df = df[[c for c in COLS if c in df.columns]].copy()
-    df["create_time"] = pd.to_datetime(df["create_time"], utc=True)
+    df["create_time"] = pd.to_datetime(df["create_time"], utc=True).dt.as_unit("ns")
     return df
 
 

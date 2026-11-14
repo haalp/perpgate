@@ -34,7 +34,8 @@ def liq_features(bars: pd.DataFrame, oi: pd.Series) -> pd.DataFrame:
     """
     close_time = bars.index + pd.Timedelta("15min")
     oi = oi.dropna().sort_index()
-    x = pd.merge_asof(pd.DataFrame({"t": close_time}), pd.DataFrame({"ts": oi.index, "oi": oi.to_numpy()}),
+    x = pd.merge_asof(pd.DataFrame({"t": pd.DatetimeIndex(close_time).as_unit("ns")}),
+                      pd.DataFrame({"ts": pd.DatetimeIndex(oi.index).as_unit("ns"), "oi": oi.to_numpy()}),
                       left_on="t", right_on="ts")
     oi_bar = x["oi"].where(x["t"] - x["ts"] <= pd.Timedelta("1h"))  # no fresh OI -> no estimate
 

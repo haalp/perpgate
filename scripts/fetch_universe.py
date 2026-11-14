@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -40,12 +41,20 @@ def base_of(pair: str) -> str:
 def download(data: Path, patterns: list[str]) -> None:
     from huggingface_hub import snapshot_download
 
-    snapshot_download(REPO, repo_type="dataset", local_dir=data / "raw", allow_patterns=patterns)
+    for attempt in range(1, 6):  # finished files are kept, so a retry only fetches what is missing
+        try:
+            snapshot_download(REPO, repo_type="dataset", local_dir=data / "raw", allow_patterns=patterns)
+            return
+        except Exception as e:  # network drops surface as many different exception types
+            if attempt == 5:
+                raise
+            print(f"    download interrupted ({type(e).__name__}); retry {attempt}/4 in 30s ...")
+            time.sleep(30)
 
 
 def read_klines(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path, columns=["date", "open", "high", "low", "close", "volume"])
-    df["date"] = pd.to_datetime(df["date"], utc=True)
+    df["date"] = pd.to_datetime(df["date"], utc=True).dt.as_unit("ns")  # the dataset stores milliseconds; keep one unit everywhere
     return df.sort_values("date")
 
 
@@ -123,6 +132,10 @@ def main() -> None:
     a.data.mkdir(parents=True, exist_ok=True)
     uni.to_csv(a.data / "universe.csv", index=False)
     pairs = sorted(uni["pair"].unique())
+    btc = uni[uni["pair"] == f"BTC{SUFFIX}"]
+    if len(btc):  # sanity check of the volume unit: compare with Binance's own monthly figure
+        r = btc.iloc[-1]
+        print(f"    check: BTC perp traded ${r['usd_volume_prev_month'] / 1e9:,.0f}bn in the month before {r['month']}")
     print(f"2/3 universe: {uni['month'].nunique()} months ({uni['month'].min()} .. {uni['month'].max()}), "
           f"{len(pairs)} distinct pairs ever in the top {a.top}")
 
@@ -140,7 +153,7 @@ def main() -> None:
     rep = pd.DataFrame(rep)
     rep.to_csv(a.data / "integrity.csv", index=False)
     funding = sum((a.data / "raw" / "futures" / "1h" / f"{p}-funding_rate.parquet").exists() for p in pairs)
-    print(f"3/3 integrity: {dict(rep['status'].str.split(':').str[0].value_counts())}; "
+    print(f"3/3 integrity: { {k: int(v) for k, v in rep['status'].str.split(':').str[0].value_counts().items()} }; "
           f"funding files for {funding}/{len(pairs)} pairs")
     print(f"    wrote {a.data / 'universe.csv'} and {a.data / 'integrity.csv'}")
 

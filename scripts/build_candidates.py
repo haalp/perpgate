@@ -20,6 +20,7 @@ it is in universe.csv. One open candidate per pair at a time. Funding is not mod
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +28,6 @@ import pandas as pd
 
 M15 = pd.Timedelta("15min")
 LOCAL_TZ = "Europe/Istanbul"   # day / week / month / year opens and the hour, dow features use this clock
-M15_NP = np.timedelta64(15, "m")
 DONCHIAN_H = 48          # 1h bars that define the "prior high" level
 RANGE_BARS, RANGE_MAX_ATR = 20, 4.0   # a range: 20 bars of a timeframe spanning <= 4 ATR of that timeframe
 # Level types for setup A, in priority order when several break on the same 1h bar.
@@ -143,7 +143,7 @@ def label(lo, hi, cl, entry, stop, cost_pct):
 
 
 def candidates_for_pair(pair: str, b15: pd.DataFrame, months: set[str], cost_pct: float) -> list[dict]:
-    events = []
+    ctx, events = {}, []
     for side in (1, -1):
         b = b15 if side == 1 else flip(b15)
         h = hourly_frame(b)
@@ -153,31 +153,35 @@ def candidates_for_pair(pair: str, b15: pd.DataFrame, months: set[str], cost_pct
         h["n_levels_broken"] = brk.sum(axis=1)
         imp = ok & (h["imp"] >= IMPULSE_ATR * h["atr"])
         for prio, n in enumerate(LEVELS):
-            events += [(t, prio, side, "A", n, b, h) for t in h.index[brk[n]]]
-        events += [(t, len(LEVELS), side, "B", "impulse", b, h) for t in h.index[imp]]
-    events.sort(key=lambda e: e[:3])
+            events += [(i, prio, side, "A", n) for i in np.flatnonzero(brk[n].to_numpy())]
+        events += [(i, len(LEVELS), side, "B", "impulse") for i in np.flatnonzero(imp.to_numpy())]
+        # plain arrays: the loop below runs once per event and must not touch pandas
+        ctx[side] = ({c: b[c].to_numpy() for c in ("open", "high", "low", "close")},
+                     {c: h[c].to_numpy() for c in h.columns})
+    events.sort()   # by 1h bar, then level priority
 
-    dates = b15.index.tz_localize(None).to_numpy()  # naive UTC datetime64
-    out, busy_until = [], None
-    for t, _, side, setup, level_type, b, h in events:
-        t_close = t + pd.Timedelta("1h")
-        if busy_until is not None and t_close <= busy_until:
+    dates = b15.index.asi8                                 # 15m bar open times, ns since epoch (UTC)
+    h_close = (h.index + pd.Timedelta("1h")).asi8          # 1h bar close times (same index for both sides)
+    m15 = M15.value
+    out, busy_until = [], -1
+    for i, _, side, setup, level_type in events:
+        if h_close[i] <= busy_until:
             continue
-        k = int(np.searchsorted(dates, t_close.tz_localize(None).to_datetime64()))
-        w = slice(k, k + SCAN_BARS)
-        if k + SCAN_BARS > len(dates) or dates[k + SCAN_BARS - 1] - dates[k] != (SCAN_BARS - 1) * M15_NP:
+        k = int(np.searchsorted(dates, h_close[i]))
+        if k + SCAN_BARS > len(dates) or dates[k + SCAN_BARS - 1] - dates[k] != (SCAN_BARS - 1) * m15:
             continue  # scan window runs off the data or over a gap
-        row = h.loc[t]
-        atr = row["atr"]
-        op, hi, lo, cl = (b[c].to_numpy()[w] for c in ("open", "high", "low", "close"))
+        B, H = ctx[side]
+        w = slice(k, k + SCAN_BARS)
+        atr = H["atr"][i]
+        op, lo, cl = B["open"][w], B["low"][w], B["close"][w]
         low_so_far = np.minimum.accumulate(lo)
         if setup == "A":
-            level = row[f"lvl_{level_type}"]
+            level = H[f"lvl_{level_type}"][i]
             dead = cl < level - FAIL_ATR * atr
             trig = (lo <= level + RETEST_ATR * atr) & (cl > level) & (cl > op)
         else:
-            level = row["imp_high"]
-            dead = low_so_far < row["close"] - FLAG_MAX_RETRACE * row["imp"]
+            level = H["imp_high"][i]
+            dead = low_so_far < H["close"][i] - FLAG_MAX_RETRACE * H["imp"][i]
             trig = (cl > level) & (np.arange(SCAN_BARS) >= FLAG_MIN_BARS)
         if not trig.any():
             continue
@@ -186,38 +190,40 @@ def candidates_for_pair(pair: str, b15: pd.DataFrame, months: set[str], cost_pct
             continue
         entry, stop = cl[j], low_so_far[j] - STOP_BUFFER_ATR * atr
         stop_pct = (entry - stop) / abs(entry)
-        entry_time = pd.Timestamp(dates[k + j], tz="UTC") + M15
+        entry_time = pd.Timestamp(int(dates[k + j] + m15), tz="UTC")
         if not (STOP_PCT_MIN <= stop_pct <= STOP_PCT_MAX) or entry_time.strftime("%Y-%m") not in months:
             continue
         f = slice(k + j + 1, k + j + 1 + HORIZON_BARS)
         fd = dates[f]
         if len(fd) == 0:
             continue
-        gap = np.flatnonzero(np.diff(fd) != M15_NP)
+        gap = np.flatnonzero(np.diff(fd) != m15)
         n = int(gap[0]) + 1 if len(gap) else len(fd)  # stop walking at the first gap
-        lab, gross, net, held = label(b["low"].to_numpy()[f][:n], b["high"].to_numpy()[f][:n],
-                                      b["close"].to_numpy()[f][:n], entry, stop, cost_pct)
-        busy_until = entry_time + held * M15
+        lab, gross, net, held = label(B["low"][f][:n], B["high"][f][:n], B["close"][f][:n], entry, stop, cost_pct)
+        busy_until = entry_time.value + held * m15
+        local = entry_time.tz_convert(LOCAL_TZ)
+        g = lambda c: H[c][i]
         out.append({
             "pair": pair, "entry_time": entry_time, "side": side, "setup": setup, "level_type": level_type,
             "entry": abs(entry), "stop": abs(stop), "stop_pct": stop_pct,
-            "label_2r": lab, "r_gross": gross, "r_net": net, "bars_held": held, "exit_time": busy_until,
+            "label_2r": lab, "r_gross": gross, "r_net": net, "bars_held": held,
+            "exit_time": pd.Timestamp(int(busy_until), tz="UTC"),
             # features: all known at entry, all expressed in the direction of the trade
-            "atr_pct": atr / abs(row["close"]), "bars_to_trigger": j + 1,
-            "dist_ema4h_atr": (row["c_4h"] - row["ema_4h"]) / atr, "dist_ema1d_pct": (row["c_1d"] - row["ema_1d"]) / abs(row["ema_1d"]),
-            "vol_rel": row["vol_rel"], "bar_range_atr": row["bar_range_atr"], "ret_24h": row["ret_24h"],
-            "ret_7d": row["ret_7d"], "rv_24h": row["rv_24h"], "entry_ext_atr": (entry - level) / atr,
-            "n_levels_broken": int(row["n_levels_broken"]),
-            **{f"dist_open_{k}_atr": (row["close"] - row[f"lvl_open_{k}"]) / atr for k in "dwmy"},
-            **{f"rng_w_{n}": row[f"rng_w_{n}"] for n in ("1h", "4h", "1d")},
-            "hour": entry_time.tz_convert(LOCAL_TZ).hour, "dow": entry_time.tz_convert(LOCAL_TZ).dayofweek,
+            "atr_pct": atr / abs(g("close")), "bars_to_trigger": j + 1,
+            "dist_ema4h_atr": (g("c_4h") - g("ema_4h")) / atr, "dist_ema1d_pct": (g("c_1d") - g("ema_1d")) / abs(g("ema_1d")),
+            "vol_rel": g("vol_rel"), "bar_range_atr": g("bar_range_atr"), "ret_24h": g("ret_24h"),
+            "ret_7d": g("ret_7d"), "rv_24h": g("rv_24h"), "entry_ext_atr": (entry - level) / atr,
+            "n_levels_broken": int(g("n_levels_broken")),
+            **{f"dist_open_{x}_atr": (g("close") - g(f"lvl_open_{x}")) / atr for x in "dwmy"},
+            **{f"rng_w_{x}": g(f"rng_w_{x}") for x in ("1h", "4h", "1d")},
+            "hour": local.hour, "dow": local.dayofweek,
         })
     return out
 
 
 def load_15m(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path, columns=["date", "open", "high", "low", "close", "volume"])
-    df["date"] = pd.to_datetime(df["date"], utc=True)
+    df["date"] = pd.to_datetime(df["date"], utc=True).dt.as_unit("ns")  # the dataset stores milliseconds; keep one unit everywhere
     return df.drop_duplicates("date").set_index("date").sort_index()
 
 
@@ -230,11 +236,18 @@ def main() -> None:
 
     uni = pd.read_csv(a.data / "universe.csv", dtype={"month": str})
     rank = uni.set_index(["pair", "month"])["rank"]
-    rows = []
-    for pair, g in uni.groupby("pair"):
+    rows, missing, t0 = [], [], time.time()
+    groups = list(uni.groupby("pair"))
+    for n, (pair, g) in enumerate(groups, 1):
         f = a.data / "raw" / "futures" / "15m" / f"{pair}.parquet"
-        if f.exists():
-            rows += candidates_for_pair(pair, load_15m(f), set(g["month"]), a.fee + a.slippage)
+        if not f.exists():
+            missing.append(pair)
+            continue
+        found = candidates_for_pair(pair, load_15m(f), set(g["month"]), a.fee + a.slippage)
+        rows += found
+        print(f"[{n:3d}/{len(groups)}] {pair:26s} {len(found):5d} candidates  ({time.time() - t0:5.0f}s)", flush=True)
+    if missing:
+        print(f"no 15m file for {len(missing)} pairs: {', '.join(missing[:10])}{' ...' if len(missing) > 10 else ''}")
     if not rows:
         raise SystemExit("no candidates - check that the 15m files and universe.csv exist")
     c = pd.DataFrame(rows).sort_values("entry_time").reset_index(drop=True)
