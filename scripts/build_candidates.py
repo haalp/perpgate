@@ -229,10 +229,11 @@ def add_momentum(c: pd.DataFrame, data: Path) -> pd.DataFrame:
     30-day return, each from the last daily bar that had closed before entry and each signed in the
     direction of the trade (for a short, a falling pair ranks high). This is how "a strongly trending
     pair" is measured without hindsight."""
-    from fetch_universe import EXCLUDED_BASES, SUFFIX, base_of
+    from fetch_universe import SUFFIX, base_of, excluded_bases
 
+    excluded = excluded_bases(data)
     files = [f for f in sorted((data / "raw" / "futures" / "1d").glob(f"*{SUFFIX}.parquet"))
-             if base_of(f.stem) not in EXCLUDED_BASES]
+             if base_of(f.stem) not in excluded]
     cols = ["mom_30d", "mom_90d", "mom_30d_rank", "mom_90d_rank", "btc_mom_30d"]
     if not files:
         print("no 1d files found - momentum features left empty")

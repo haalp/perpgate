@@ -64,3 +64,6 @@ is opened.
   lose after costs; setup B is the only positive group; shorts beat longs in every row.
 - 2026-11-14. Stock, ETF, metal and oil perps removed from the universe (decided from the ticker list, not
   from results). Momentum rank features added. Opens moved to Istanbul time on 2026-11-12.
+- 2026-11-15. The non-crypto filter now reads Binance's `underlyingType` instead of a hand-kept list, after
+  seven stock perps (AAOI, NBIS, LITE, DRAM and others) slipped past the list. Decided from the contract
+  metadata, not from results.

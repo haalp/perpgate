@@ -32,15 +32,36 @@ TF_FREQ = {"1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min", "1h": "1h",
 
 # Stablecoins and pegged assets barely move, so the setups do not apply.
 STABLE_BASES = {"USDC", "BUSD", "TUSD", "FDUSD", "USDP", "DAI", "UST", "USTC", "EUR", "USD1", "PAXG", "XAUT", "WBTC"}
-# Perps on stocks, ETFs, metals and oil: not crypto, different hours and drivers. Review this list when the
-# universe changes; a ticker missing here simply stays in.
+# Perps on stocks, ETFs, metals and oil: not crypto, different hours and drivers. The live list comes from
+# Binance (every contract whose underlyingType is not COIN) and is saved to data/non_crypto_bases.txt; the
+# names below are a fallback for when Binance cannot be reached and for contracts it no longer lists.
+EXCHANGE_INFO = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 NON_CRYPTO_BASES = {
     "GOOGL", "NVDA", "TSLA", "MSTR", "INTC", "MRVL", "MU", "SNDK", "CRCL", "SAMSUNG", "SKHYNIX", "SPCX",   # stocks
     "AAPL", "AMZN", "META", "MSFT", "AMD", "COIN", "HOOD", "PLTR", "NFLX", "BABA", "TSM", "AVGO",
     "QQQ", "SPY", "SOXL", "EWY", "IWM", "TQQQ",                                                            # ETFs
     "XAU", "XAG", "XPT", "XPD", "CL", "BZ", "NATGAS", "COPPER",                                            # metals, oil
 }
-EXCLUDED_BASES = STABLE_BASES | NON_CRYPTO_BASES
+
+
+def refresh_non_crypto(data: Path) -> None:
+    """Ask Binance which contracts are not crypto and save their base assets."""
+    import requests
+
+    try:
+        symbols = requests.get(EXCHANGE_INFO, timeout=30).json()["symbols"]
+    except Exception as e:
+        print(f"    could not get the contract list from Binance ({type(e).__name__}); using the saved / built-in list")
+        return
+    bases = sorted({s["baseAsset"] for s in symbols if s.get("underlyingType", "COIN") != "COIN"})
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "non_crypto_bases.txt").write_text("\n".join(bases) + "\n")
+    print(f"    Binance lists {len(bases)} non-crypto underlyings (stocks, ETFs, commodities)")
+
+
+def excluded_bases(data: Path) -> set[str]:
+    f = data / "non_crypto_bases.txt"
+    return STABLE_BASES | NON_CRYPTO_BASES | (set(f.read_text().split()) if f.exists() else set())
 
 
 def base_of(pair: str) -> str:
@@ -69,10 +90,10 @@ def read_klines(path: Path) -> pd.DataFrame:
 
 def build_universe(data: Path, top: int, min_days: int) -> pd.DataFrame:
     """Rank pairs each month by the previous month's USD volume (close * base volume)."""
-    rows = []
+    rows, excluded = [], excluded_bases(data)
     for f in sorted((data / "raw" / "futures" / "1d").glob(f"*{SUFFIX}.parquet")):
         pair = f.stem
-        if base_of(pair) in EXCLUDED_BASES:
+        if base_of(pair) in excluded:
             continue
         df = read_klines(f)
         if df.empty:
@@ -136,6 +157,7 @@ def main() -> None:
     if not a.no_download:
         print("1/3 downloading all daily files (small) to rank pairs ...")
         download(a.data, [f"futures/1d/*{SUFFIX}.parquet", "coverage.csv"])
+    refresh_non_crypto(a.data)
 
     uni = build_universe(a.data, a.top, a.min_days)
     a.data.mkdir(parents=True, exist_ok=True)
@@ -146,15 +168,17 @@ def main() -> None:
         r = btc.iloc[-1]
         print(f"    check: BTC perp traded ${r['usd_volume_prev_month'] / 1e9:,.0f}bn in the month before {r['month']}")
     on_disk = {base_of(f.stem) for f in (a.data / "raw" / "futures" / "1d").glob(f"*{SUFFIX}.parquet")}
-    print(f"    excluded as stable or non-crypto: {', '.join(sorted(on_disk & EXCLUDED_BASES))}")
+    print(f"    excluded as stable or non-crypto: {', '.join(sorted(on_disk & excluded_bases(a.data)))}")
     print(f"2/3 universe: {uni['month'].nunique()} months ({uni['month'].min()} .. {uni['month'].max()}), "
           f"{len(pairs)} distinct pairs ever in the top {a.top}")
 
     if not a.no_download:
         want = [f"futures/{tf}/{p}.parquet" for tf in tfs if tf != "1d" for p in pairs]
         want += [f"futures/1h/{p}-funding_rate.parquet" for p in pairs]  # sparse: present only for some pairs
-        print(f"    downloading {len(want)} files for {', '.join(tfs)} + funding ...")
-        download(a.data, want)
+        want = [w for w in want if not (a.data / "raw" / w).exists()]   # files already on disk are not re-checked
+        print(f"    {len(want)} files to fetch for {', '.join(tfs)} + funding (the rest are on disk) ...")
+        if want:
+            download(a.data, want)
 
     rep = []
     for tf in tfs:
