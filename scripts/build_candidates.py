@@ -44,6 +44,10 @@ STOP_BUFFER_ATR = 0.1
 STOP_PCT_MIN, STOP_PCT_MAX = 0.003, 0.05   # skip stops tighter than 0.3% or wider than 5%
 HORIZON_BARS = 672       # 7 days of 15m bars, then the trade is closed at market
 TP1_R, TP2_R = 2.0, 3.0
+# A hole this long in a pair's history is treated as a new start: Binance reuses tickers (LIT was Litentry and
+# is now Lighter), and levels, averages and returns must never be computed across the two.
+GAP_SPLIT = pd.Timedelta("3D")
+MIN_SEGMENT_BARS = 96 * 30   # a stretch needs 30 days of 15m bars before it can produce candidates
 
 
 def flip(df: pd.DataFrame) -> pd.DataFrame:
@@ -145,7 +149,22 @@ def label(lo, hi, cl, entry, stop, cost_pct):
     return lab, gross, gross - 2 * cost_pct * abs(entry) / r, held + 1
 
 
+def segments(b15: pd.DataFrame) -> list[pd.DataFrame]:
+    """Split a pair's bars at every hole longer than GAP_SPLIT."""
+    cut = np.flatnonzero(np.diff(b15.index.asi8) > GAP_SPLIT.value) + 1
+    bounds = [0, *cut.tolist(), len(b15)]
+    return [b15.iloc[s:e] for s, e in zip(bounds[:-1], bounds[1:])]
+
+
 def candidates_for_pair(pair: str, b15: pd.DataFrame, months: set[str], cost_pct: float) -> list[dict]:
+    out = []
+    for seg in segments(b15):
+        if len(seg) >= MIN_SEGMENT_BARS:
+            out += segment_candidates(pair, seg, months, cost_pct)
+    return out
+
+
+def segment_candidates(pair: str, b15: pd.DataFrame, months: set[str], cost_pct: float) -> list[dict]:
     ctx, events = {}, []
     for side in (1, -1):
         b = b15 if side == 1 else flip(b15)
@@ -240,9 +259,13 @@ def add_momentum(c: pd.DataFrame, data: Path) -> pd.DataFrame:
         return c.assign(**{k: np.nan for k in cols})
     px = pd.DataFrame({f.stem: load_15m(f)["close"] for f in files}).sort_index()
     px = px.reindex(pd.date_range(px.index.min(), px.index.max(), freq="D"))   # one row per calendar day
+    # a return is only valid if the pair traded without a hole longer than GAP_SPLIT inside the window,
+    # so a reused ticker never gets a return measured from the previous asset's price
+    gap_days = int(GAP_SPLIT / pd.Timedelta("1D"))
+    long_hole = px.isna().rolling(gap_days + 1).sum() > gap_days        # True on a day that ends a > gap_days hole
     parts = {}
     for d in (30, 90):
-        r = px / px.shift(d) - 1
+        r = (px / px.shift(d) - 1).where(long_hole.rolling(d + 1, min_periods=1).sum() == 0)
         parts[f"mom_{d}d"], parts[f"mom_{d}d_rank"] = r, r.rank(axis=1, pct=True)
     long = pd.DataFrame({"day": px.index.repeat(px.shape[1]), "pair": np.tile(px.columns.to_numpy(), px.shape[0]),
                          **{k: v.to_numpy().ravel() for k, v in parts.items()}})
@@ -281,9 +304,12 @@ def main() -> None:
         if not f.exists():
             missing.append(pair)
             continue
-        found = candidates_for_pair(pair, load_15m(f), set(g["month"]), a.fee + a.slippage)
+        b15 = load_15m(f)
+        found = candidates_for_pair(pair, b15, set(g["month"]), a.fee + a.slippage)
         rows += found
-        print(f"[{n:3d}/{len(groups)}] {pair:26s} {len(found):5d} candidates  ({time.time() - t0:5.0f}s)", flush=True)
+        parts = len(segments(b15))
+        note = f"  history in {parts} separate stretches" if parts > 1 else ""
+        print(f"[{n:3d}/{len(groups)}] {pair:26s} {len(found):5d} candidates  ({time.time() - t0:5.0f}s){note}", flush=True)
     if missing:
         print(f"no 15m file for {len(missing)} pairs: {', '.join(missing[:10])}{' ...' if len(missing) > 10 else ''}")
     if not rows:

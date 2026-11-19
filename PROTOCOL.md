@@ -67,3 +67,6 @@ is opened.
 - 2026-11-15. The non-crypto filter now reads Binance's `underlyingType` instead of a hand-kept list, after
   seven stock perps (AAOI, NBIS, LITE, DRAM and others) slipped past the list. Decided from the contract
   metadata, not from results.
+- 2026-11-19. A pair's history is now split at every hole longer than three days and each stretch is
+  processed on its own, because Binance reuses tickers (LIT: Litentry, later Lighter). Momentum returns are
+  blank until a full window has passed since the hole. Decided from the data layout, not from results.

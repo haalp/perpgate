@@ -37,6 +37,9 @@ python scripts/fetch_metrics.py      # optional for now; slow
 
 Every threshold is a named constant at the top of the script.
 
+A hole longer than three days in a pair's history starts a new, separate stretch: tickers get reused, and
+no level, average or return is computed across the two assets.
+
 ## Status
 
 First run on real data (2020-02 to 2026-11, 131k candidates before the non-crypto perps were removed): taking
